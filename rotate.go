@@ -93,7 +93,7 @@ func (this *Rotate) Start(LogLevel int, logW IlogrusRotate) func() {
 	dir := filepath.Join(logW.LogDir(), time.Now().Format(logW.FormatDir()))
 	this.createDir(dir, forceRecreate)
 
-	tmp, _ := os.OpenFile(filepath.Join(dir, "Log_"+time.Now().Format(logW.FormatFile())), os.O_CREATE|os.O_WRONLY, os.ModeAppend)
+	tmp, _ := os.OpenFile(filepath.Join(dir, "Log_"+time.Now().Format(logW.FormatFile())), os.O_CREATE|os.O_WRONLY, os.ModePerm)
 	logrus.SetOutput(tmp)
 
 	this.timerChange = time.NewTicker(time.Minute)
@@ -115,7 +115,7 @@ func (this *Rotate) Start(LogLevel int, logW IlogrusRotate) func() {
 					return
 				}
 
-				Log, _ := os.OpenFile(newFileName, os.O_CREATE|os.O_WRONLY, os.ModeAppend)
+				Log, _ := os.OpenFile(newFileName, os.O_CREATE|os.O_WRONLY, os.ModePerm)
 				oldFile := logrus.StandardLogger().Out.(*os.File)
 				logrus.SetOutput(Log)
 				this.DeleleEmptyFile(oldFile)
