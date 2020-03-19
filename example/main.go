@@ -3,6 +3,8 @@ package main
 import (
 	logrusRotate "github.com/LazarenkoA/LogrusRotate"
 	"github.com/sirupsen/logrus"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -21,7 +23,8 @@ func main() {
 
 
 func (w *RotateConf) LogDir() string {
-	return "D:\\GoMy\\src\\LogrusWriter\\log"
+	currentDir, _ := os.Getwd()
+	return filepath.Join(currentDir, "Logs")
 }
 
 func (w *RotateConf) FormatDir() string {
