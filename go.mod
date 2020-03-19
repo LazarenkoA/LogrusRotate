@@ -1,4 +1,4 @@
-module mod
+module github.com/LazarenkoA/LogrusRotate
 
 require (
 	github.com/fsnotify/fsnotify v1.4.9
