@@ -1,7 +1,7 @@
 package main
 
 import (
-	"LogrusWriter"
+	logrusRotate "github.com/LazarenkoA/LogrusRotate"
 	"github.com/sirupsen/logrus"
 	"time"
 )
