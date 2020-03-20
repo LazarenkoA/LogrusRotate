@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/fsnotify/fsnotify"
+	"github.com/matryer/resync"
 	"github.com/sirupsen/logrus"
 	"io/ioutil"
 	"log"
@@ -30,70 +31,64 @@ type IlogrusRotate interface {
 	// Время ротации логов (в часах). Через сколько часов создасться новый файл, минимальное время 1 час.
 	TimeRotate() int
 }
-
 type Rotate struct {
 	watcher     *fsnotify.Watcher
 	ttltimer    *time.Ticker
 	timerChange *time.Ticker
 	ctx         context.Context
 	dirPath     string
+	one resync.Once
 }
 
-func (this *Rotate) createDir(dir string, forceRecreate chan string) {
+
+func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string)  {
 	defer func() {
 		if e := recover(); e != nil {
-			logrus.WithError(fmt.Errorf("%v", e)).
-				WithField("dir", dir).
-				Error("Произошла ошибка при создании каталога")
+			logrus.WithError(fmt.Errorf("%v", e)).Error("Произошла ошибка при создании каталога")
 		}
 	}()
-
-	logrus.Debugln("Создаем каталог", dir)
 	var cansel context.CancelFunc
 
 	this.ctx, cansel = context.WithCancel(context.Background())
-	this.dirPath = dir
 
 	actions := make(map[fsnotify.Op]func(string))
+	this.one.Reset()
 	actions[fsnotify.Remove] = func(Delfile string) {
-		if stat, err := os.Stat(Delfile); !os.IsNotExist(err) && stat.IsDir() {
-			defer cansel() // что бы закрылся хук т.к. нам он уже не нужен, каталог то удален
-		}
+		// Удаление каталога со всеми вложенными приведет к тому, то хук будет вызван несколько раз для каждого файла и подкаталога который внутри
+		// причем в последовательности файл -> подкаталог -> корневой каталог
+		// если мы запустим создания файла он все равно будет удален при удалении каталогов
+		// посему повеливаю, не ебать голову, через секунду после удаления создать полный путь с файлом
+		this.one.Do(func() {
+			go func() {
+				time.Sleep(time.Second)
+				defer cansel() // что бы закрылся хук т.к. нам он уже не нужен, новый хук будет установлен на новый каталог
 
-		// Если удален активный файл логов, то создаем новый
-		dir, _ := filepath.Split(logrus.StandardLogger().Out.(*os.File).Name())
-		if logrus.StandardLogger().Out.(*os.File).Name() == Delfile || dir[:len(dir)-1] == Delfile {
-			if _, err := os.Stat(dir); os.IsNotExist(err) {
-				this.createDir(dir, forceRecreate) // вызываем createDir, что бы опять установился хук на новый каталог
-			}
-			forceRecreate <- dir
-		}
+				this.createDir(conf, forceRecreate) // вызываем createDir, что бы опять установился хук на новый каталог
+				forceRecreate <- this.dirPath // отправляем в канал для принудительного пересоздания файла
+			}()
+		})
 	}
 
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		if err = os.Mkdir(dir, os.ModePerm); err != nil {
-			logrus.WithError(err).Errorln("Ошибка создания каталога ", dir)
+	this.dirPath = filepath.Join(conf.LogDir(), time.Now().Format(conf.FormatDir()))
+	if _, err := os.Stat(this.dirPath); os.IsNotExist(err) {
+		logrus.Debugln("Создаем каталог", this.dirPath)
+		if err = os.MkdirAll(this.dirPath, os.ModePerm); err != nil {
+			logrus.WithError(err).Errorln("Ошибка создания каталога ", this.dirPath)
 		}
 	}
 
 	go this.NewHook(actions)
 }
 
-func (this *Rotate) Start(LogLevel int, logW IlogrusRotate) func() {
-
-	if logW.TTLLogs() < logW.TimeRotate() {
+func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
+	if conf.TTLLogs() < conf.TimeRotate() {
 		panic("TTLLogs не может быть меньше или равен значению TimeRotate")
 	}
 
 	forceRecreate := make(chan string)
-	if _, err := os.Stat(logW.LogDir()); os.IsNotExist(err) {
-		this.createDir(logW.LogDir(), forceRecreate)
-	}
+	this.createDir(conf, forceRecreate)
 
-	dir := filepath.Join(logW.LogDir(), time.Now().Format(logW.FormatDir()))
-	this.createDir(dir, forceRecreate)
-
-	tmp, _ := os.OpenFile(filepath.Join(dir, "Log_"+time.Now().Format(logW.FormatFile())), os.O_CREATE|os.O_WRONLY, os.ModePerm)
+	tmp, _ := os.OpenFile(filepath.Join(this.dirPath , "Log_"+time.Now().Format(conf.FormatFile())), os.O_CREATE|os.O_WRONLY, os.ModePerm)
 	logrus.SetOutput(tmp)
 
 	this.timerChange = time.NewTicker(time.Minute)
@@ -110,7 +105,7 @@ func (this *Rotate) Start(LogLevel int, logW IlogrusRotate) func() {
 					}
 				}()
 
-				newFileName := filepath.Join(dir, "Log_"+time.Now().Format(logW.FormatFile()))
+				newFileName := filepath.Join(dir, "Log_"+time.Now().Format(conf.FormatFile()))
 				if _, err := os.Stat(newFileName); os.IsExist(err) {
 					return
 				}
@@ -123,15 +118,14 @@ func (this *Rotate) Start(LogLevel int, logW IlogrusRotate) func() {
 
 			select {
 			case <-this.timerChange.C:
-				if time.Since(timeStart).Minutes() + float64(currentMinute) < float64(logW.TimeRotate() * 60) {
+				if time.Since(timeStart).Minutes() + float64(currentMinute) < float64(conf.TimeRotate() * 60) {
 					continue
 				}
 				timeStart = time.Now()
 				currentMinute = time.Now().Minute()
 
-				dir := filepath.Join(logW.LogDir(), time.Now().Format(logW.FormatDir()))
-				this.createDir(dir, forceRecreate)
-				createfile(dir)
+				this.createDir(conf, forceRecreate)
+				createfile(this.dirPath)
 			case dir := <-forceRecreate:
 				createfile(dir)
 			}
@@ -151,7 +145,7 @@ func (this *Rotate) Start(LogLevel int, logW IlogrusRotate) func() {
 
 				if !info.IsDir() {
 					diff := time.Since(info.ModTime()).Hours()
-					if diff > float64(logW.TTLLogs()) {
+					if diff > float64(conf.TTLLogs()) {
 						if err := os.Remove(path); err != nil {
 							logrus.WithError(err).WithField("Файл", path).Error("Ошибка удаления файла")
 						}
