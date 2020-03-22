@@ -2,7 +2,6 @@ package main
 
 import (
 	logrusRotate "github.com/LazarenkoA/LogrusRotate"
-	"github.com/sirupsen/logrus"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,9 +14,9 @@ func main() {
 	lw := new(logrusRotate.Rotate).Construct()
 	defer lw.Start(5, new(RotateConf))()
 
-	timerChange := time.NewTicker(time.Minute * 5)
+	timerChange := time.NewTicker(time.Second * 5)
 	for range timerChange.C {
-		logrus.Info("Запись")
+		logrusRotate.StandardLogger().Info("Запись")
 	}
 }
 
