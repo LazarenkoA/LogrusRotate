@@ -40,6 +40,10 @@ type Rotate struct {
 	one resync.Once
 }
 
+// Для обращений к logrus
+func StandardLogger() *logrus.Logger {
+	return logrus.StandardLogger()
+}
 
 func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string)  {
 	defer func() {
