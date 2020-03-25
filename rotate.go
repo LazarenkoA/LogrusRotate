@@ -110,7 +110,7 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 				}()
 
 				newFileName := filepath.Join(dir, "Log_"+time.Now().Format(conf.FormatFile()))
-				if _, err := os.Stat(newFileName); os.IsExist(err) {
+				if _, err := os.Stat(newFileName); !os.IsNotExist(err) {
 					return
 				}
 
@@ -142,16 +142,13 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 	go func() {
 		for range this.ttltimer.C {
 			filepath.Walk(this.dirPath, func(path string, info os.FileInfo, err error) error {
-				// Проверяем существование т.к. может быть удален другой горутиной
-				if _, err := os.Stat(path); os.IsNotExist(err) {
-					return nil
-				}
-
 				if !info.IsDir() {
 					diff := time.Since(info.ModTime()).Hours()
 					if diff > float64(conf.TTLLogs()) {
-						if err := os.Remove(path); err != nil {
-							logrus.WithError(err).WithField("Файл", path).Error("Ошибка удаления файла")
+						if _, err := os.Stat(path); !os.IsNotExist(err) { // файл может быть удален в другом потоке
+							if err := os.Remove(path); err != nil {
+								logrus.WithError(err).WithField("Файл", path).Error("Ошибка удаления файла")
+							}
 						}
 					}
 				} else {
