@@ -141,7 +141,7 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 	this.ttltimer = time.NewTicker(time.Minute * 50)
 	go func() {
 		for range this.ttltimer.C {
-			filepath.Walk(this.dirPath, func(path string, info os.FileInfo, err error) error {
+			filepath.Walk(conf.LogDir(), func(path string, info os.FileInfo, err error) error {
 				if !info.IsDir() {
 					diff := time.Since(info.ModTime()).Hours()
 					if diff > float64(conf.TTLLogs()) {
