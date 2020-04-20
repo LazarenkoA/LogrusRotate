@@ -115,9 +115,9 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 				}
 
 				Log, _ := os.OpenFile(newFileName, os.O_APPEND | os.O_CREATE | os.O_WRONLY, os.ModePerm)
-				oldFile := logrus.StandardLogger().Out.(*os.File)
+				//oldFile := logrus.StandardLogger().Out.(*os.File)
 				logrus.SetOutput(Log)
-				this.DeleleEmptyFile(oldFile)
+				//this.DeleleEmptyFile(oldFile)
 			}
 
 			select {
@@ -145,10 +145,8 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 				if !info.IsDir() {
 					diff := time.Since(info.ModTime()).Hours()
 					if diff > float64(conf.TTLLogs()) {
-						if _, err := os.Stat(path); !os.IsNotExist(err) { // файл может быть удален в другом потоке
-							if err := os.Remove(path); err != nil {
-								logrus.WithError(err).WithField("Файл", path).Error("Ошибка удаления файла")
-							}
+						if err := os.Remove(path); err != nil {
+							logrus.WithError(err).WithField("Файл", path).Error("Ошибка удаления файла")
 						}
 					}
 				} else {
@@ -184,7 +182,7 @@ func (this *Rotate) Destroy() {
 	this.ttltimer.Stop()
 	this.watcher.Close()
 
-	this.DeleleEmptyFile(logrus.StandardLogger().Out.(*os.File))
+	//this.DeleleEmptyFile(logrus.StandardLogger().Out.(*os.File))
 }
 
 func (this *Rotate) DeleleEmptyFile(file *os.File) {
@@ -213,7 +211,6 @@ func (this *Rotate) DeleleEmptyFile(file *os.File) {
 	}
 
 	var dirPath string
-	// Для каталога, если пустой, то зачем он нам
 	if !info.IsDir() {
 		dirPath, _ = filepath.Split(file.Name())
 	} else {
@@ -222,16 +219,12 @@ func (this *Rotate) DeleleEmptyFile(file *os.File) {
 	}
 
 	// Если в текущем каталоге нет файлов, пробуем удалить его
-	files, err := ioutil.ReadDir(dirPath)
-	if err != nil {
+	if files, err := ioutil.ReadDir(dirPath); err != nil {
 		logrus.WithError(err).WithField("Каталог", dirPath).Error("Ошибка получения списка файлов в каталоге")
 		return
-	}
-
-	if len(files) == 0 {
+	} else if len(files) == 0 {
 		os.Remove(dirPath)
 	}
-
 }
 
 // Хук нужен для отслеживания удаления файлов логов, что бы тут же создать новый
