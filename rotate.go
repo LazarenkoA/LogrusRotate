@@ -35,9 +35,10 @@ type Rotate struct {
 	watcher     *fsnotify.Watcher
 	ttltimer    *time.Ticker
 	timerChange *time.Ticker
-	ctx         context.Context
-	dirPath     string
-	one resync.Once
+	mx          *sync.Mutex
+	//ctx         context.Context
+	dirPath string
+	one     resync.Once
 }
 
 // Для обращений к logrus
@@ -45,15 +46,14 @@ func StandardLogger() *logrus.Logger {
 	return logrus.StandardLogger()
 }
 
-func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string)  {
+func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string) {
 	defer func() {
 		if e := recover(); e != nil {
 			logrus.WithError(fmt.Errorf("%v", e)).Error("Произошла ошибка при создании каталога")
 		}
 	}()
-	var cansel context.CancelFunc
-
-	this.ctx, cansel = context.WithCancel(context.Background())
+	// var cansel context.CancelFunc
+	ctx, cansel := context.WithCancel(context.Background())
 
 	actions := make(map[fsnotify.Op]func(string))
 	this.one.Reset()
@@ -68,7 +68,7 @@ func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string)  {
 				defer cansel() // что бы закрылся хук т.к. нам он уже не нужен, новый хук будет установлен на новый каталог
 
 				this.createDir(conf, forceRecreate) // вызываем createDir, что бы опять установился хук на новый каталог
-				forceRecreate <- this.dirPath // отправляем в канал для принудительного пересоздания файла
+				forceRecreate <- this.dirPath       // отправляем в канал для принудительного пересоздания файла
 			}()
 		})
 	}
@@ -81,7 +81,14 @@ func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string)  {
 		}
 	}
 
-	go this.NewHook(actions)
+	go this.NewHook(actions, ctx)
+}
+
+func (this *Rotate) Mutex() *sync.Mutex {
+	this.one.Do(func() {
+		this.mx = new(sync.Mutex)
+	})
+	return this.mx
 }
 
 func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
@@ -92,12 +99,12 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 	forceRecreate := make(chan string)
 	this.createDir(conf, forceRecreate)
 
-	tmp, _ := os.OpenFile(filepath.Join(this.dirPath , "Log_"+time.Now().Format(conf.FormatFile())), os.O_APPEND | os.O_CREATE | os.O_WRONLY, os.ModePerm)
+	tmp, _ := os.OpenFile(filepath.Join(this.dirPath, "Log_"+time.Now().Format(conf.FormatFile())), os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.ModePerm)
 	logrus.SetOutput(tmp)
 
 	this.timerChange = time.NewTicker(time.Minute)
 	timeStart := time.Now()
-	currentMinute := time.Now().Minute()  // нам нужно понимать сколько прошло минут текущего часа
+	currentMinute := time.Now().Minute() // нам нужно понимать сколько прошло минут текущего часа
 	go func() {
 		for {
 			createfile := func(dir string) {
@@ -114,21 +121,24 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 					return
 				}
 
-				Log, _ := os.OpenFile(newFileName, os.O_APPEND | os.O_CREATE | os.O_WRONLY, os.ModePerm)
+				Log, _ := os.OpenFile(newFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.ModePerm)
 				//oldFile := logrus.StandardLogger().Out.(*os.File)
+				this.Mutex().Lock()
 				logrus.SetOutput(Log)
+				this.Mutex().Unlock()
 				//this.DeleleEmptyFile(oldFile)
 			}
 
 			select {
 			case <-this.timerChange.C:
-				if time.Since(timeStart).Minutes() + float64(currentMinute) < float64(conf.TimeRotate() * 60) {
+				if time.Since(timeStart).Minutes()+float64(currentMinute) < float64(conf.TimeRotate()*60) {
 					continue
 				}
 				timeStart = time.Now()
 				currentMinute = time.Now().Minute()
 
 				this.createDir(conf, forceRecreate)
+
 				createfile(this.dirPath)
 			case dir := <-forceRecreate:
 				createfile(dir)
@@ -229,7 +239,7 @@ func (this *Rotate) DeleleEmptyFile(file *os.File) {
 
 // Хук нужен для отслеживания удаления файлов логов, что бы тут же создать новый
 // в linux можно удалить даже когда открыт дескриптор на файл
-func (this *Rotate) NewHook(actions map[fsnotify.Op]func(string)) {
+func (this *Rotate) NewHook(actions map[fsnotify.Op]func(string), ctx context.Context) {
 	wg := new(sync.WaitGroup)
 	wg.Add(1)
 	go func() {
@@ -251,7 +261,7 @@ func (this *Rotate) NewHook(actions map[fsnotify.Op]func(string)) {
 					return
 				}
 				log.Println("Ошибка мониторинга директории:", err)
-			case <-this.ctx.Done():
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -264,4 +274,3 @@ func (this *Rotate) NewHook(actions map[fsnotify.Op]func(string)) {
 
 	wg.Wait()
 }
-
