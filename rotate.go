@@ -125,7 +125,7 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 					}
 				}()
 
-				newFileName := filepath.Join(this.dirPath, "Log_"+time.Now().Format(conf.FormatFile())+".log")
+				newFileName := filepath.Join(dir, "Log_"+time.Now().Format(conf.FormatFile())+".log")
 				if _, err := os.Stat(newFileName); !os.IsNotExist(err) {
 					return
 				}
