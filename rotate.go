@@ -84,6 +84,15 @@ func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string) {
 	go this.NewHook(actions, ctx)
 }
 
+func (this *Rotate) createFile(fileName string) (file *os.File) {
+	if _, err := os.Stat(fileName); os.IsNotExist(err) {
+		file, _ = os.Create(fileName)
+	} else {
+		file, _ = os.OpenFile(fileName, os.O_APPEND, os.ModeAppend)
+	}
+	return file
+}
+
 func (this *Rotate) Mutex() *sync.Mutex {
 	this.one.Do(func() {
 		this.mx = new(sync.Mutex)
@@ -99,8 +108,8 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 	forceRecreate := make(chan string)
 	this.createDir(conf, forceRecreate)
 
-	tmp, _ := os.OpenFile(filepath.Join(this.dirPath, "Log_"+time.Now().Format(conf.FormatFile())), os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.ModePerm)
-	logrus.SetOutput(tmp)
+	fpath := filepath.Join(this.dirPath, "Log_"+time.Now().Format(conf.FormatFile())+".log")
+	logrus.SetOutput(this.createFile(fpath))
 
 	this.timerChange = time.NewTicker(time.Minute)
 	timeStart := time.Now()
@@ -116,12 +125,13 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 					}
 				}()
 
-				newFileName := filepath.Join(dir, "Log_"+time.Now().Format(conf.FormatFile()))
+				newFileName := filepath.Join(this.dirPath, "Log_"+time.Now().Format(conf.FormatFile())+".log")
 				if _, err := os.Stat(newFileName); !os.IsNotExist(err) {
 					return
 				}
 
-				Log, _ := os.OpenFile(newFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.ModePerm)
+				logrus.SetOutput(this.createFile(fpath))
+
 				//oldFile := logrus.StandardLogger().Out.(*os.File)
 				this.Mutex().Lock()
 				logrus.SetOutput(Log)
