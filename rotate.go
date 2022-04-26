@@ -130,11 +130,9 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 					return
 				}
 
-				logrus.SetOutput(this.createFile(fpath))
-
 				//oldFile := logrus.StandardLogger().Out.(*os.File)
 				this.Mutex().Lock()
-				logrus.SetOutput(Log)
+				logrus.SetOutput(this.createFile(newFileName))
 				this.Mutex().Unlock()
 				//this.DeleleEmptyFile(oldFile)
 			}
