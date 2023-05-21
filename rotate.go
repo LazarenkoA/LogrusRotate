@@ -80,9 +80,9 @@ func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string) {
 		if err = os.MkdirAll(this.dirPath, os.ModePerm); err != nil {
 			logrus.WithError(err).Errorln("Ошибка создания каталога ", this.dirPath)
 		}
-	}
 
-	go this.NewHook(actions, ctx)
+		go this.NewHook(actions, ctx)
+	}
 }
 
 func (this *Rotate) createFile(fileName string) (file *os.File) {
@@ -131,11 +131,11 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 					return
 				}
 
-				// oldFile := logrus.StandardLogger().Out.(*os.File)
+				oldFile := logrus.StandardLogger().Out.(*os.File)
 				this.Mutex().Lock()
 				logrus.SetOutput(this.createFile(newFileName))
 				this.Mutex().Unlock()
-				// this.DeleleEmptyFile(oldFile)
+				oldFile.Close()
 			}
 
 			select {
@@ -164,7 +164,7 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 				if !info.IsDir() {
 					diff := time.Since(info.ModTime()).Hours()
 					if diff > float64(conf.TTLLogs()) {
-						if err := os.Remove(path); err != nil {
+						if err := os.RemoveAll(path); err != nil {
 							logrus.WithError(err).WithField("Файл", path).Error("Ошибка удаления файла")
 						}
 					}
