@@ -3,15 +3,16 @@ package logrusRotate
 import (
 	"context"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
-	"github.com/matryer/resync"
-	"github.com/sirupsen/logrus"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/matryer/resync"
+	"github.com/sirupsen/logrus"
 )
 
 type IlogrusRotate interface {
@@ -36,7 +37,7 @@ type Rotate struct {
 	ttltimer    *time.Ticker
 	timerChange *time.Ticker
 	mx          *sync.Mutex
-	//ctx         context.Context
+	// ctx         context.Context
 	dirPath string
 	one     resync.Once
 }
@@ -53,7 +54,7 @@ func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string) {
 		}
 	}()
 	// var cansel context.CancelFunc
-	ctx, cansel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 
 	actions := make(map[fsnotify.Op]func(string))
 	this.one.Reset()
@@ -65,7 +66,7 @@ func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string) {
 		this.one.Do(func() {
 			go func() {
 				time.Sleep(time.Second)
-				defer cansel() // что бы закрылся хук т.к. нам он уже не нужен, новый хук будет установлен на новый каталог
+				defer cancel() // что бы закрылся хук т.к. нам он уже не нужен, новый хук будет установлен на новый каталог
 
 				this.createDir(conf, forceRecreate) // вызываем createDir, что бы опять установился хук на новый каталог
 				forceRecreate <- this.dirPath       // отправляем в канал для принудительного пересоздания файла
@@ -130,11 +131,11 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 					return
 				}
 
-				//oldFile := logrus.StandardLogger().Out.(*os.File)
+				// oldFile := logrus.StandardLogger().Out.(*os.File)
 				this.Mutex().Lock()
 				logrus.SetOutput(this.createFile(newFileName))
 				this.Mutex().Unlock()
-				//this.DeleleEmptyFile(oldFile)
+				// this.DeleleEmptyFile(oldFile)
 			}
 
 			select {
@@ -170,7 +171,7 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 				} else {
 					// Очистка пустых каталогов
 					if dir, err := os.OpenFile(path, os.O_RDONLY, os.ModeDir); err == nil {
-						this.DeleleEmptyFile(dir)
+						this.DeleteEmptyFile(dir)
 					} else {
 						return err
 					}
@@ -190,7 +191,7 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 
 func (this *Rotate) Construct() *Rotate {
 	this.watcher, _ = fsnotify.NewWatcher()
-	//this.mu = new(sync.Mutex)
+	// this.mu = new(sync.Mutex)
 
 	return this
 }
@@ -200,10 +201,10 @@ func (this *Rotate) Destroy() {
 	this.ttltimer.Stop()
 	this.watcher.Close()
 
-	//this.DeleleEmptyFile(logrus.StandardLogger().Out.(*os.File))
+	// this.DeleleEmptyFile(logrus.StandardLogger().Out.(*os.File))
 }
 
-func (this *Rotate) DeleleEmptyFile(file *os.File) {
+func (this *Rotate) DeleteEmptyFile(file *os.File) {
 	defer func() {
 		// если файл все еще есть, значит он не пуст, просто закрываем его
 		if _, err := file.Stat(); !os.IsNotExist(err) {
