@@ -3,11 +3,9 @@ package logrusRotate
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -32,14 +30,74 @@ type IlogrusRotate interface {
 	// Время ротации логов (в часах). Через сколько часов создасться новый файл, минимальное время 1 час.
 	TimeRotate() int
 }
+
 type Rotate struct {
-	watcher     *fsnotify.Watcher
-	ttltimer    *time.Ticker
+	ttlTimer    *time.Ticker
 	timerChange *time.Ticker
-	mx          *sync.Mutex
-	// ctx         context.Context
-	dirPath string
-	one     resync.Once
+	dirPath     atomic.Value
+	watch       *watcher
+}
+
+type watcher struct {
+	*fsnotify.Watcher
+
+	actionsType fsnotify.Op
+	one         resync.Once
+	handler     func(*watcher, string)
+	dirPath     string
+	ctx         context.Context
+	cancel      context.CancelFunc
+}
+
+func newWatcher(actionsType fsnotify.Op, dirPath string, handler func(*watcher, string)) *watcher {
+	ctx, cancel := context.WithCancel(context.Background())
+	w, _ := fsnotify.NewWatcher()
+
+	return &watcher{
+		actionsType: actionsType,
+		handler:     handler,
+		ctx:         ctx,
+		cancel:      cancel,
+		Watcher:     w,
+		dirPath:     dirPath,
+	}
+}
+
+// Хук нужен для отслеживания удаления файлов логов, что бы тут же создать новый
+// в linux можно удалить даже когда открыт дескриптор на файл
+func (a *watcher) runHook() {
+	logrus.WithField("dirPath", a.dirPath).Info("add hook")
+	defer func() {
+		logrus.WithField("dirPath", a.dirPath).Info("Close watcher")
+	}()
+
+	err := a.Watcher.Add(a.dirPath)
+	if err != nil {
+		logrus.WithError(err).Errorf("Не удалось установить мониторинг за каталогом %q", a.dirPath)
+	}
+
+	for {
+		select {
+		case event, ok := <-a.Watcher.Events:
+			if !ok {
+				return
+			}
+
+			if event.Op == a.actionsType {
+				a.handler(a, event.Name)
+			}
+		case err := <-a.Watcher.Errors:
+			logrus.WithError(err).Error("Ошибка мониторинга директории")
+			return
+		case <-a.ctx.Done():
+			return
+		}
+	}
+}
+
+func (a *watcher) Cancel() {
+	a.cancel()
+	a.Close()
 }
 
 // Для обращений к logrus
@@ -47,45 +105,42 @@ func StandardLogger() *logrus.Logger {
 	return logrus.StandardLogger()
 }
 
-func (this *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string) {
+func (r *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string) {
 	defer func() {
 		if e := recover(); e != nil {
 			logrus.WithError(fmt.Errorf("%v", e)).Error("Произошла ошибка при создании каталога")
 		}
 	}()
-	// var cansel context.CancelFunc
-	ctx, cancel := context.WithCancel(context.Background())
 
-	actions := make(map[fsnotify.Op]func(string))
-	this.one.Reset()
-	actions[fsnotify.Remove] = func(Delfile string) {
-		// Удаление каталога со всеми вложенными приведет к тому, то хук будет вызван несколько раз для каждого файла и подкаталога который внутри
-		// причем в последовательности файл -> подкаталог -> корневой каталог
-		// если мы запустим создания файла он все равно будет удален при удалении каталогов
-		// посему повеливаю, не ебать голову, через секунду после удаления создать полный путь с файлом
-		this.one.Do(func() {
-			go func() {
-				time.Sleep(time.Second)
-				defer cancel() // что бы закрылся хук т.к. нам он уже не нужен, новый хук будет установлен на новый каталог
-
-				this.createDir(conf, forceRecreate) // вызываем createDir, что бы опять установился хук на новый каталог
-				forceRecreate <- this.dirPath       // отправляем в канал для принудительного пересоздания файла
-			}()
-		})
+	r.dirPath.Store(filepath.Join(conf.LogDir(), time.Now().Format(conf.FormatDir())))
+	if _, err := os.Stat(r.dirPath.Load().(string)); !os.IsNotExist(err) {
+		return
 	}
 
-	this.dirPath = filepath.Join(conf.LogDir(), time.Now().Format(conf.FormatDir()))
-	if _, err := os.Stat(this.dirPath); os.IsNotExist(err) {
-		logrus.Debugln("Создаем каталог", this.dirPath)
-		if err = os.MkdirAll(this.dirPath, os.ModePerm); err != nil {
-			logrus.WithError(err).Errorln("Ошибка создания каталога ", this.dirPath)
+	logrus.Debugln("Создаем новый каталог", r.dirPath)
+	if err := os.MkdirAll(r.dirPath.Load().(string), os.ModePerm); err != nil {
+		logrus.WithError(err).Errorln("Ошибка создания каталога ", r.dirPath)
+	}
+
+	r.watch = newWatcher(fsnotify.Remove, r.dirPath.Load().(string), func(w *watcher, currentFile string) {
+		if currentFile == w.dirPath {
+			defer w.Cancel() // что бы закрылся хук т.к. нам он уже не нужен, новый хук будет установлен на новый каталог
 		}
 
-		go this.NewHook(actions, ctx)
-	}
+		if currentFile != w.dirPath { // хук будет вызываться для каждого файла в каталоге, нам по сути нужен только текущий каталог в который пишутся логи
+			return
+		}
+
+		go func() {
+			r.createDir(conf, forceRecreate)           // вызываем createDir, что бы опять установился хук на новый каталог
+			forceRecreate <- r.dirPath.Load().(string) // отправляем в канал для принудительного пересоздания файла
+		}()
+	})
+
+	go r.watch.runHook()
 }
 
-func (this *Rotate) createFile(fileName string) (file *os.File) {
+func (r *Rotate) createFile(fileName string) (file *os.File) {
 	if _, err := os.Stat(fileName); os.IsNotExist(err) {
 		file, _ = os.Create(fileName)
 	} else {
@@ -94,25 +149,18 @@ func (this *Rotate) createFile(fileName string) (file *os.File) {
 	return file
 }
 
-func (this *Rotate) Mutex() *sync.Mutex {
-	this.one.Do(func() {
-		this.mx = new(sync.Mutex)
-	})
-	return this.mx
-}
-
-func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
+func (r *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 	if conf.TTLLogs() < conf.TimeRotate() {
 		panic("TTLLogs не может быть меньше или равен значению TimeRotate")
 	}
 
 	forceRecreate := make(chan string)
-	this.createDir(conf, forceRecreate)
+	r.createDir(conf, forceRecreate)
 
-	fpath := filepath.Join(this.dirPath, "Log_"+time.Now().Format(conf.FormatFile())+".log")
-	logrus.SetOutput(this.createFile(fpath))
+	fpath := filepath.Join(r.dirPath.Load().(string), "Log_"+time.Now().Format(conf.FormatFile())+".log")
+	logrus.SetOutput(r.createFile(fpath))
 
-	this.timerChange = time.NewTicker(time.Minute)
+	r.timerChange = time.NewTicker(time.Minute)
 	timeStart := time.Now()
 	currentMinute := time.Now().Minute() // нам нужно понимать сколько прошло минут текущего часа
 	go func() {
@@ -132,23 +180,20 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 				}
 
 				oldFile := logrus.StandardLogger().Out.(*os.File)
-				this.Mutex().Lock()
-				logrus.SetOutput(this.createFile(newFileName))
-				this.Mutex().Unlock()
+				logrus.SetOutput(r.createFile(newFileName))
 				oldFile.Close()
 			}
 
 			select {
-			case <-this.timerChange.C:
+			case <-r.timerChange.C:
 				if time.Since(timeStart).Minutes()+float64(currentMinute) < float64(conf.TimeRotate()*60) {
 					continue
 				}
 				timeStart = time.Now()
 				currentMinute = time.Now().Minute()
 
-				this.createDir(conf, forceRecreate)
-
-				createfile(this.dirPath)
+				r.createDir(conf, forceRecreate)
+				createfile(r.dirPath.Load().(string))
 			case dir := <-forceRecreate:
 				createfile(dir)
 			}
@@ -157,9 +202,9 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 	}()
 
 	// очистка старых файлов и пустых каталогов
-	this.ttltimer = time.NewTicker(time.Minute * 50)
+	r.ttlTimer = time.NewTicker(time.Minute)
 	go func() {
-		for range this.ttltimer.C {
+		for range r.ttlTimer.C {
 			filepath.Walk(conf.LogDir(), func(path string, info os.FileInfo, err error) error {
 				if !info.IsDir() {
 					diff := time.Since(info.ModTime()).Hours()
@@ -171,7 +216,7 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 				} else {
 					// Очистка пустых каталогов
 					if dir, err := os.OpenFile(path, os.O_RDONLY, os.ModeDir); err == nil {
-						this.DeleteEmptyFile(dir)
+						r.DeleteEmptyFile(dir)
 					} else {
 						return err
 					}
@@ -186,25 +231,22 @@ func (this *Rotate) Start(LogLevel int, conf IlogrusRotate) func() {
 		logrus.SetLevel(logrus.Level(LogLevel))
 	}
 
-	return this.Destroy
+	return r.Destroy
 }
 
-func (this *Rotate) Construct() *Rotate {
-	this.watcher, _ = fsnotify.NewWatcher()
-	// this.mu = new(sync.Mutex)
-
-	return this
+func (r *Rotate) Construct() *Rotate {
+	// todo
+	return r
 }
 
-func (this *Rotate) Destroy() {
-	this.timerChange.Stop()
-	this.ttltimer.Stop()
-	this.watcher.Close()
+func (r *Rotate) Destroy() {
+	r.timerChange.Stop()
+	r.ttlTimer.Stop()
 
-	// this.DeleleEmptyFile(logrus.StandardLogger().Out.(*os.File))
+	// r.DeleleEmptyFile(logrus.StandardLogger().Out.(*os.File))
 }
 
-func (this *Rotate) DeleteEmptyFile(file *os.File) {
+func (r *Rotate) DeleteEmptyFile(file *os.File) {
 	defer func() {
 		// если файл все еще есть, значит он не пуст, просто закрываем его
 		if _, err := file.Stat(); !os.IsNotExist(err) {
@@ -238,48 +280,13 @@ func (this *Rotate) DeleteEmptyFile(file *os.File) {
 	}
 
 	// Если в текущем каталоге нет файлов, пробуем удалить его
-	if files, err := ioutil.ReadDir(dirPath); err != nil {
+	if files, err := os.ReadDir(dirPath); err != nil {
 		logrus.WithError(err).WithField("Каталог", dirPath).Error("Ошибка получения списка файлов в каталоге")
 		return
 	} else if len(files) == 0 {
-		os.Remove(dirPath)
-	}
-}
-
-// Хук нужен для отслеживания удаления файлов логов, что бы тут же создать новый
-// в linux можно удалить даже когда открыт дескриптор на файл
-func (this *Rotate) NewHook(actions map[fsnotify.Op]func(string), ctx context.Context) {
-	wg := new(sync.WaitGroup)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		for {
-			select {
-			case event, ok := <-this.watcher.Events:
-				if !ok {
-					return
-				}
-				for fsnotifyType, action := range actions {
-					if event.Op&fsnotifyType == fsnotifyType {
-						action(event.Name)
-					}
-				}
-			case err, ok := <-this.watcher.Errors:
-				if !ok {
-					return
-				}
-				log.Println("Ошибка мониторинга директории:", err)
-			case <-ctx.Done():
-				return
-			}
+		r.watch.Cancel() // перед удалением отменяем хук, т.к. хук нужен как защита от удаления текущего каталока (в ллинукс можно удалить каталог с файлами в который в данным момент пишутся логи)
+		if err := os.RemoveAll(dirPath); err != nil {
+			logrus.WithError(err).WithField("dirPath", dirPath).Error("Ошибка удаления каталога")
 		}
-	}()
-
-	err := this.watcher.Add(this.dirPath)
-	if err != nil {
-		logrus.WithError(err).Errorf("Не удалось установить мониторинг за каталогом %q", this.dirPath)
 	}
-
-	wg.Wait()
 }
