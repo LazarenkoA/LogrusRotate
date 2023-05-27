@@ -114,7 +114,7 @@ func (r *Rotate) createDir(conf IlogrusRotate, forceRecreate chan string) {
 
 	r.dirPath.Store(filepath.Join(conf.LogDir(), time.Now().Format(conf.FormatDir())))
 	if _, err := os.Stat(r.dirPath.Load().(string)); !os.IsNotExist(err) {
-		return
+		r.dirPath.Store(filepath.Join(conf.LogDir(), time.Now().Format(conf.FormatDir())) + time.Now().Format(".000000"))
 	}
 
 	logrus.Debugln("Создаем новый каталог", r.dirPath)
